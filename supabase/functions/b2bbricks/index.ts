@@ -4,7 +4,7 @@ const base={'Content-Type':'application/json','Cache-Control':'no-store','Access
 const uuid=(v:unknown)=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 const safe=(c:Record<string,unknown>)=>{const {webhook_url,headers,...rest}=c;return {...rest,has_webhook:!!webhook_url,has_headers:Object.keys((headers||{}) as object).length>0}};
 
-const validClock=(v:unknown)=>typeof v==='string'&&/^(?:[01]\\d|2[0-3]):[0-5]\\d$/.test(v);
+const validClock=(v:unknown)=>typeof v==='string'&&/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(v);
 function scheduleTransfer(entries:any[],schedule:any){
  if(!schedule||schedule.enabled!==true)return entries;
  if(schedule.mode!=='interval'&&schedule.mode!=='spread')throw Error('Choose a valid transfer release mode.');
@@ -15,7 +15,7 @@ function scheduleTransfer(entries:any[],schedule:any){
  let from=0,to=24*60;
  if(work){
   if(!validClock(schedule.work_start)||!validClock(schedule.work_end))throw Error('Choose valid working hours.');
-  const parts=(s:string)=>Number(s.slice(0,2))*60+Number(s.slice(3,5));
+  const parts=(v:string)=>Number(v.slice(0,2))*60+Number(v.slice(3,5));
   from=parts(schedule.work_start);to=parts(schedule.work_end);
   if(to<=from)throw Error('Working-hours end must be after the start.');
  }
@@ -29,12 +29,14 @@ function scheduleTransfer(entries:any[],schedule:any){
  let base=schedule.start_at?Date.parse(String(schedule.start_at)):Date.now();
  if(!Number.isFinite(base))throw Error('Choose a valid transfer start time.');
  base=align(Math.max(Date.now(),base));
- const eligible=entries.map((e,i)=>({e,i})).filter(({e})=>!e.error&&/^\\+91[6-9]\\d{9}$/.test(String(e.mobile||'')));
+ const eligible=entries.map((e,i)=>({e,i})).filter(({e})=>!e.error&&/^\+91[6-9]\d{9}$/.test(String(e.mobile||'')));
  const batchCount=Math.max(1,Math.ceil(eligible.length/batchSize));
+ const step=schedule.mode==='interval'?minutes:(batchCount>1?minutes/(batchCount-1):0);
  const times:string[]=[];
+ let stamp=base;
  for(let i=0;i<batchCount;i++){
-  const delta=schedule.mode==='interval'?i*minutes:(batchCount>1?i*minutes/(batchCount-1):0);
-  times.push(new Date(align(base+delta*60000)).toISOString());
+  if(i>0)stamp=align(stamp+step*60000);
+  times.push(new Date(stamp).toISOString());
  }
  const positions=new Map<number,number>();
  eligible.forEach(({i},n)=>positions.set(i,Math.floor(n/batchSize)));
