@@ -80,7 +80,7 @@ Deno.serve(async(req:Request)=>{
     if(error)throw error;
     for(const lead of data||[]){
      for(const phone of lead.phone_numbers||[]){
-      const digits=String(phone||'').replace(/\\D/g,'');
+      const digits=String(phone||'').replace(/\D/g,'');
       if(digits.length<10)continue;
       const key=digits.slice(-10),ids=phoneToLeadIds.get(key)||[];
       if(!ids.includes(lead.id))ids.push(lead.id);
@@ -95,8 +95,9 @@ Deno.serve(async(req:Request)=>{
     for(const d of data||[]){
      const connection=(Array.isArray(d.b2bbricks_connections)?d.b2bbricks_connections[0]:d.b2bbricks_connections) as {id:string;name:string}|null;
      if(!connection?.id)continue;
-     const digits=String(d.mobile||'').replace(/\\D/g,'');
-     const matchedIds=d.lead_id?[d.lead_id]:(digits.length>=10?phoneToLeadIds.get(digits.slice(-10))||[]:[]);
+     const digits=String(d.mobile||'').replace(/\D/g,'');
+     const candidates=digits.length>=10?phoneToLeadIds.get(digits.slice(-10))||[]:[];
+     const matchedIds=d.lead_id?[d.lead_id]:(candidates.length===1?candidates:[]);
      for(const leadId of matchedIds){
       const destinations=tags[leadId]||(tags[leadId]=[]);
       if(!destinations.some(item=>item.id===connection.id))destinations.push({id:connection.id,name:connection.name,sent_at:d.sent_at||null});
