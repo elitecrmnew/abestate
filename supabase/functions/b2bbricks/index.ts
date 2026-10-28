@@ -8,9 +8,9 @@ const validClock=(v:unknown)=>typeof v==='string'&&/^(?:[01]\\d|2[0-3]):[0-5]\\d
 function scheduleTransfer(entries:any[],schedule:any){
  if(!schedule||schedule.enabled!==true)return entries;
  if(schedule.mode!=='interval'&&schedule.mode!=='spread')throw Error('Choose a valid transfer release mode.');
- const batchSize=Number(schedule.batch_size),hours=Number(schedule.interval_hours);
+ const batchSize=Number(schedule.batch_size),minutes=Number(schedule.interval_minutes);
  if(!Number.isInteger(batchSize)||batchSize<1||batchSize>100)throw Error('Choose 1–100 leads per transfer batch.');
- if(!Number.isFinite(hours)||hours<1||hours>744)throw Error('Choose a transfer interval/duration from 1 to 744 hours.');
+ if(!Number.isFinite(minutes)||minutes<1||minutes>44640)throw Error('Choose an interval or duration from 1 minute to 31 days.');
  const work=!!schedule.work_enabled, offset=330*60000;
  let from=0,to=24*60;
  if(work){
@@ -29,13 +29,12 @@ function scheduleTransfer(entries:any[],schedule:any){
  let base=schedule.start_at?Date.parse(String(schedule.start_at)):Date.now();
  if(!Number.isFinite(base))throw Error('Choose a valid transfer start time.');
  base=align(Math.max(Date.now(),base));
- const sequence=new Map<number,string>();
  const eligible=entries.map((e,i)=>({e,i})).filter(({e})=>!e.error&&/^\\+91[6-9]\\d{9}$/.test(String(e.mobile||'')));
  const batchCount=Math.max(1,Math.ceil(eligible.length/batchSize));
  const times:string[]=[];
  for(let i=0;i<batchCount;i++){
-  const delta=schedule.mode==='interval'?i*hours:(batchCount>1?i*hours/(batchCount-1):0);
-  times.push(new Date(align(base+delta*3600000)).toISOString());
+  const delta=schedule.mode==='interval'?i*minutes:(batchCount>1?i*minutes/(batchCount-1):0);
+  times.push(new Date(align(base+delta*60000)).toISOString());
  }
  const positions=new Map<number,number>();
  eligible.forEach(({i},n)=>positions.set(i,Math.floor(n/batchSize)));
