@@ -1,0 +1,148 @@
+// AB Estate central sync: install ONCE in a Google Sheet via Extensions > Apps Script.
+// Add ABESTATE_API_KEY in Project Settings > Script properties. Never put it in a cell.
+// After setup, add spreadsheet links and tab names in the AB Sources tab — no code edits.
+const AB_CONFIG = __AB_CONFIG__;
+function abPrepareControl(control){
+ const labels=['Spreadsheet URL','Tab name','Enabled','Last checked','Status','Header row','Rows','Columns','Name mapping','Phone mapping','Email mapping','Budget mapping','Campaign mapping','Message mapping','CRM Group'];
+ control.getRange(1,1,1,labels.length).setValues([labels]);
+}
+function abColumnNumber(value){
+ let n=0;for(const c of value)n=n*26+c.charCodeAt(0)-64;return n;
+}
+function abSelection(options,lastRow,lastCol){
+ const headerText=String(options.header||'').trim();
+ if(headerText&&!/^[1-9]\d*$/.test(headerText))throw Error('Header row must be a positive row number.');
+ const header=headerText?Number(headerText):1;
+ if(header>lastRow)throw Error('Header row is outside the sheet.');
+ const spec=String(options.rows||'').trim(),selected=new Set();
+ if(!spec){for(let r=header+1;r<=lastRow;r++)selected.add(r);}
+ else{
+  for(const part of spec.split(',')){
+   const match=part.trim().match(/^([1-9]\d*)(?:\s*[-:]\s*([1-9]\d*))?$/);
+   if(!match)throw Error('Rows: use 5 for row 5 onward, 1-5 for a range, or 1,2,5 for individual rows.');
+   const start=Number(match[1]),end=match[2]?Number(match[2]):spec.includes(',')?start:lastRow;
+   if(match[2]&&end<start)throw Error('Row range end must be at least its start.');
+   for(let r=start;r<=Math.min(end,lastRow);r++)if(r>header)selected.add(r);
+  }
+ }
+ const colSpec=String(options.columns||'').trim().toUpperCase();let from=1,to=lastCol;
+ if(colSpec){const m=colSpec.match(/^([A-Z]+)(?:\s*[:-]\s*([A-Z]+))?$/);if(!m)throw Error('Columns: enter E:F or leave blank for all columns.');from=abColumnNumber(m[1]);to=abColumnNumber(m[2]||m[1]);if(from>to||to>lastCol)throw Error('Column range is outside the sheet or reversed.');}
+ return {header,rows:[...selected].sort((a,b)=>a-b),from,to};
+}
+function onOpen(){SpreadsheetApp.getUi().createMenu('AB Estate').addItem('Start automatic sync','startAbEstate').addItem('Sync now','syncAbEstate').addItem('Stop automatic sync','stopAbEstate').addToUi();}
+function startAbEstate(){
+ const p=PropertiesService.getScriptProperties();
+ if(!/^[a-f0-9]{64}$/.test(p.getProperty('ABESTATE_API_KEY')||''))throw Error('Add ABESTATE_API_KEY in Project Settings > Script properties.');
+ const book=SpreadsheetApp.getActiveSpreadsheet();
+ if(!book)throw Error('Install this script through a control Google Sheet > Extensions > Apps Script.');
+ let control=book.getSheetByName('AB Sources');
+ if(!control){
+  control=book.insertSheet('AB Sources');
+  control.getRange(1,1,1,5).setValues([['Spreadsheet URL','Tab name','Enabled','Last checked','Status']]);
+  control.setFrozenRows(1);
+ }
+ abPrepareControl(control);
+ p.setProperty('ABESTATE_CONTROL',book.getId());
+ stopAbEstate();
+ ScriptApp.newTrigger('syncAbEstate').timeBased().everyMinutes(1).create();
+ syncAbEstate();
+}
+function stopAbEstate(){ScriptApp.getProjectTriggers().filter(t=>t.getHandlerFunction()==='syncAbEstate').forEach(t=>ScriptApp.deleteTrigger(t));}
+function abBookId(value){
+ const match=String(value).trim().match(/^https:\/\/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9_-]+)(?:[/?#]|$)/);
+ if(!match)throw Error('Paste a Google spreadsheet URL in column A.');return match[1];
+}
+function syncAbEstate(){
+ const lock=LockService.getScriptLock();if(!lock.tryLock(1000))return;
+ try{
+  const props=PropertiesService.getScriptProperties(),key=props.getProperty('ABESTATE_API_KEY');
+  if(!key)throw Error('Missing ABESTATE_API_KEY');
+  const controlBook=SpreadsheetApp.openById(props.getProperty('ABESTATE_CONTROL'));
+  const control=controlBook.getSheetByName('AB Sources');if(!control)throw Error('Run startAbEstate to create AB Sources.');
+  if(control.getLastRow()<2)return;
+  abPrepareControl(control);
+  const sources=control.getRange(2,1,control.getLastRow()-1,15).getDisplayValues();
+  const budget={remaining:50,deadline:Date.now()+240000},seen=new Set();
+  let cursor=Number(props.getProperty('ABESTATE_SOURCE_CURSOR')||0)%sources.length;
+  for(let visited=0;visited<sources.length&&budget.remaining>0&&Date.now()<budget.deadline;visited++){
+   const idx=cursor;cursor=(cursor+1)%sources.length;
+   const [link,tab,enabled,,,header,rows,columns,name,phone,email,budgetMapping,campaign,message,group]=sources[idx].map(x=>x.trim());
+   if(!link&&!tab)continue;
+   if(['false','no','off','0'].includes(enabled.toLowerCase()))continue;
+   let status;
+   try{
+    const bookId=abBookId(link);if(!tab)throw Error('Enter the exact tab name in column B.');
+    if(bookId===controlBook.getId()&&tab==='AB Sources')throw Error('The control tab cannot also be a lead source.');
+    const sourceKey=bookId+':'+tab;
+    if(seen.has(sourceKey)){status='Duplicate source — listed more than once';}
+    else{
+     seen.add(sourceKey);
+     const book=SpreadsheetApp.openById(bookId),sheet=book.getSheetByName(tab);
+     if(!sheet)throw Error('Tab not found. Check spelling in column B.');
+     status=abSyncTab(book,sheet,props,key,budget,{header,rows,columns,mapping:{name,phone,email,budget:budgetMapping,campaign,message},group});
+    }
+   }catch(e){status='Error: '+String(e.message||e).slice(0,200);}
+   // Find source again in case the control list was sorted during a request.
+   const current=control.getRange(2,1,control.getLastRow()-1,2).getDisplayValues();
+   const row=current.findIndex(r=>r[0].trim()===link&&r[1].trim()===tab);
+   if(row>=0)control.getRange(row+2,4,1,2).setValues([[new Date(),status]]);
+  }
+  props.setProperty('ABESTATE_SOURCE_CURSOR',String(cursor));
+ }finally{lock.releaseLock();}
+}
+function abSyncTab(book,sheet,props,key,budget,options={}){
+ const columns={...AB_CONFIG.columns};
+ for(const field of ['name','phone','email','budget','campaign','message'])if(String(options.mapping?.[field]||'').trim())columns[field]=String(options.mapping[field]).trim();
+ const cursorKey='ABESTATE_ROW_CURSOR_'+book.getId()+'_'+sheet.getSheetId();
+  const selection=abSelection(options,Math.max(1,sheet.getLastRow()),Math.max(1,sheet.getLastColumn()));
+  let headers=sheet.getRange(selection.header,1,1,Math.max(1,sheet.getLastColumn())).getDisplayValues()[0].map(x=>x.trim());
+  const readable=headers.map((h,i)=>i+1>=selection.from&&i+1<=selection.to?h:'');
+  const mapped={};
+  for(const [field,spec] of Object.entries(columns)){
+   mapped[field]=[...new Set(String(spec||'').split(',').map(h=>h.trim()).filter(Boolean))];
+   for(const h of mapped[field])if(readable.filter(x=>x===h).length>1)throw Error('Repeated mapped header: '+h);
+  }
+  for(const f of ['name','phone'])if(!mapped[f]?.some(h=>readable.includes(h)))throw Error('Missing required column for '+f+': '+(columns[f]||'(not mapped)')+'. Check this source mapping in AB Sources or the default CRM mapping.');
+  for(const h of ['AB Row ID','AB Sync Hash','AB Sync Status'])if(!headers.includes(h)){headers.push(h);sheet.getRange(selection.header,headers.length).setValue(h);}
+  const idCol=headers.indexOf('AB Row ID'),hashCol=headers.indexOf('AB Sync Hash'),statusCol=headers.indexOf('AB Sync Status');
+  const count=selection.rows.length;if(count<=0)return 'No data rows in selected range';
+  const allValues=sheet.getRange(selection.header+1,1,sheet.getLastRow()-selection.header,headers.length).getDisplayValues();
+  const values=selection.rows.map(r=>allValues[r-selection.header-1]);
+  let cursor=Math.min(Number(props.getProperty(cursorKey)||0),count-1),attempts=0;
+  const ids=new Set();
+  for(const row of allValues){if(row[idCol]&&ids.has(row[idCol]))throw Error('Duplicate AB Row ID. Clear the ID/hash/status on the copied row.');if(row[idCol])ids.add(row[idCol]);}
+  for(let checked=0;checked<Math.min(count,500)&&attempts<25&&budget.remaining>0&&Date.now()<budget.deadline;checked++){
+   const idx=cursor,row=values[idx],sourceRow=selection.rows[idx];cursor=(cursor+1)%count;
+   const body={};for(const [field,names] of Object.entries(mapped)){
+    const found=names.map(h=>({header:h,value:String((readable.includes(h)?row[headers.indexOf(h)]:'')||'').trim()})).filter(x=>x.value);
+    body[field]=field==='message'&&names.length>1?found.map(x=>x.header+': '+x.value).join('\n'):(found[0]?.value||'');
+   }
+   if(!body.name&&!body.phone)continue;
+   if(!body.name||!body.phone){sheet.getRange(sourceRow,statusCol+1).setValue('Needs name and phone');continue;}
+   if(body.email==='-')body.email='';
+   if(String(options.group||'').trim())body.crm_group=String(options.group).trim();
+   if(!row[idCol]){row[idCol]=Utilities.getUuid();sheet.getRange(sourceRow,idCol+1).setValue(row[idCol]);SpreadsheetApp.flush();}
+   body.external_id=book.getId()+':'+sheet.getSheetId()+':'+row[idCol];
+   const hash=Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,AB_CONFIG.url+'|'+JSON.stringify(body)));
+   if(row[hashCol]===hash)continue;
+   const wait=Math.max(0,(budget.nextSendAt||0)-Date.now());
+   if(Date.now()+wait>=budget.deadline){cursor=idx;break;}
+   if(wait)Utilities.sleep(wait);
+   budget.nextSendAt=Date.now()+5000;
+   attempts++;budget.remaining--;
+   let status,accepted=false;
+   try{
+    const r=UrlFetchApp.fetch(AB_CONFIG.url,{method:'post',contentType:'application/json',headers:{'x-integration-key':key},payload:JSON.stringify(body),muteHttpExceptions:true,followRedirects:false});
+    let result={};try{result=JSON.parse(r.getContentText())}catch{}
+    accepted=r.getResponseCode()===200&&result.ok===true;
+    status=accepted?(result.outcome==='duplicate'?'Duplicate — existing CRM lead kept':result.b2b_batch_id?'Imported — B2BBricks queued':'Imported'):'Retry: '+(result.error||'HTTP '+r.getResponseCode());
+    if([401,403,404,429,503].includes(r.getResponseCode())){cursor=idx;checked=count;}
+   }catch(e){status='Retry: connection unavailable';cursor=idx;checked=count;}
+   // Find the stable ID again so a sort during a network request cannot mark another lead.
+   const currentIds=sheet.getRange(selection.header+1,idCol+1,sheet.getLastRow()-selection.header,1).getDisplayValues();
+   const at=currentIds.findIndex(r=>r[0]===row[idCol]);
+   if(at>=0){sheet.getRange(at+selection.header+1,statusCol+1).setValue(String(status).slice(0,250));if(accepted)sheet.getRange(at+selection.header+1,hashCol+1).setValue(hash);}
+  }
+  props.setProperty(cursorKey,String(cursor));
+  return attempts+' rows checked for import. See AB Sync Status in source tab.';
+}

@@ -1,0 +1,61 @@
+begin;
+select pg_advisory_xact_lock(hashtextextended('abestate-assignment-release',0));
+do $$begin
+ if exists(select 1 from public.assignment_schedules where status='Active') then raise exception 'Run isolated fixture tests before real schedules exist';end if;
+end $$;
+create temp table fixture(admin uuid,caller uuid,gid uuid,l1 uuid,l2 uuid,l3 uuid,sid uuid);
+insert into fixture select gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),null;
+insert into auth.users(id,email) select admin,admin::text||'@fixture.invalid' from fixture union all select caller,caller::text||'@fixture.invalid' from fixture;
+insert into public.crm_profiles(id,username,display_name,role,active) select admin,'fx_'||substr(md5(admin::text),1,12),'Fixture admin','admin',true from fixture union all select caller,'fx_'||substr(md5(caller::text),1,12),'Fixture caller','caller',true from fixture;
+insert into public.lead_groups(id,owner_id,name) select gid,admin,'Scheduler fixture' from fixture;
+insert into public.leads(id,owner_id,group_id,customer_name) select l1,admin,gid,'Fixture 1' from fixture union all select l2,admin,gid,'Fixture 2' from fixture union all select l3,admin,gid,'Fixture 3' from fixture;
+select set_config('request.jwt.claim.sub',(select admin::text from fixture),true);
+update fixture set sid=public.crm_schedule_assignments(array[l1,l2],caller,'Fixture interval','interval',1,2,now(),null,null);
+do $$declare f fixture;begin
+ select * into f from fixture;
+ if exists(select 1 from public.leads where id in(f.l1,f.l2) and assigned_to is not null) then raise exception 'Premature assignment';end if;
+ begin perform public.crm_schedule_assignments(array[f.l1],f.caller,'Duplicate','interval',1,2,now(),null,null);raise exception 'Duplicate schedule was accepted';exception when raise_exception then if sqlerrm='Duplicate schedule was accepted' then raise;end if;end;
+ if crm_private.assignment_slot('2026-10-16 14:00Z','10:00','19:00')<>'2026-10-17 04:30Z'::timestamptz then raise exception 'After-hours rollover failed';end if;
+ if crm_private.assignment_slot('2026-10-16 03:00Z','10:00','19:00')<>'2026-10-16 04:30Z'::timestamptz then raise exception 'Morning rollover failed';end if;
+end $$;
+select set_config('request.jwt.claim.sub','',true);
+select crm_private.release_assignments();
+do $$declare f fixture;begin
+ select * into f from fixture;
+ if (select count(*) from public.leads where id in(f.l1,f.l2) and assigned_to=f.caller)<>1 then raise exception 'Batch size failed';end if;
+ if (select count(*) from public.crm_assignment_notifications where user_id=f.caller)<>1 then raise exception 'Assignment notification missing';end if;
+ if crm_private.release_assignments()<>0 then raise exception 'Early batch released';end if;
+end $$;
+select set_config('request.jwt.claim.sub',(select caller::text from fixture),true);
+do $$declare f fixture;begin
+ select * into f from fixture;
+ begin perform public.crm_control_schedule(f.sid,'cancel');raise exception 'Caller cancelled schedule';exception when raise_exception then if sqlerrm='Caller cancelled schedule' then raise;end if;end;
+end $$;
+grant select on fixture to authenticated;
+set local role authenticated;
+do $$begin
+ if exists(select 1 from public.assignment_schedules) then raise exception 'Caller can read schedules';end if;
+ if (select count(*) from public.leads where id in(select l1 from fixture union select l2 from fixture))<>1 then raise exception 'Caller sees queued lead';end if;
+ begin update public.leads set assigned_to=null where id=(select l1 from fixture);raise exception 'Caller changed assignment';exception when raise_exception then if sqlerrm='Caller changed assignment' then raise;end if;end;
+end $$;
+reset role;
+select set_config('request.jwt.claim.sub',(select admin::text from fixture),true);
+select public.crm_control_schedule(sid,'pause') from fixture;
+select public.crm_control_schedule(sid,'resume') from fixture;
+select public.crm_control_schedule(sid,'cancel') from fixture;
+do $$declare f fixture;begin select * into f from fixture;
+ if (select status from public.assignment_items where lead_id=f.l2)<>'Cancelled' then raise exception 'Cancel did not stop pending';end if;
+ if (select assigned_to from public.leads where id=f.l1)<>f.caller then raise exception 'Cancel changed released lead';end if;
+end $$;
+update fixture set sid=public.crm_schedule_assignments(array[l2,l3],caller,'Spread fixture','spread',1,24,now(),null,null);
+do $$declare f fixture;begin select * into f from fixture;
+ if (select interval_seconds from public.assignment_schedules where id=f.sid)<>86400 then raise exception 'Spread interval incorrect';end if;
+ update public.leads set assigned_to=f.caller where id=f.l2;
+end $$;
+select set_config('request.jwt.claim.sub','',true);
+select crm_private.release_assignments();
+do $$declare f fixture;begin select * into f from fixture;
+ if (select status from public.assignment_items where schedule_id=f.sid and lead_id=f.l2)<>'Skipped' then raise exception 'Manually assigned lead was not skipped';end if;
+end $$;
+select 'PASS: release timing, working hours, duplicate reservation, caller RLS and update guard, pause/resume/cancel, spread timing, manual assignment protection, notification trigger' as result;
+rollback;

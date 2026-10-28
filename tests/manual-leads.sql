@@ -1,0 +1,38 @@
+begin;
+do $$
+declare adm uuid; caller uuid; gid uuid; hidden uuid; result jsonb; blocked boolean;
+begin
+ select id into adm from public.crm_profiles where role='admin' and active limit 1;
+ select id into caller from public.crm_profiles where role='caller' and active limit 1;
+ if adm is null or caller is null then raise exception 'Need existing admin and caller fixtures'; end if;
+ update public.crm_profiles set creation_admin_id=null where id=caller;
+ perform public.crm_set_caller_creation_permissions(adm,caller,false,false);
+ blocked=false;begin perform public.crm_create_manual_lead(caller,'Test','9876500123',null);exception when raise_exception then blocked=true;end;
+ if not blocked then raise exception 'Denied caller created lead';end if;
+ blocked=false;begin perform public.crm_create_manual_group(caller,'Disabled test');exception when raise_exception then blocked=true;end;
+ if not blocked then raise exception 'Denied caller created group';end if;
+ blocked=false;begin perform public.crm_set_caller_creation_permissions(caller,caller,true,true);exception when raise_exception then blocked=true;end;
+ if not blocked then raise exception 'Caller self escalated';end if;
+ perform public.crm_set_caller_creation_permissions(adm,caller,true,true);
+ gid=public.crm_create_manual_group(caller,'Permission test '||gen_random_uuid()::text);
+ result=public.crm_create_manual_lead(caller,'Manual test','p:+91 98765-00123',gid);
+ if not exists(select 1 from public.leads where id=(result->>'id')::uuid and assigned_to=caller and assigned_at is not null and owner_id=adm and manual_created_by=caller and phone_numbers=array['+919876500123']) then raise exception 'Ownership or normalization mismatch';end if;
+ blocked=false;begin perform public.crm_create_manual_lead(caller,'Duplicate','9876500123',gid);exception when raise_exception then blocked=true;end;
+ if not blocked then raise exception 'Duplicate accepted';end if;
+ hidden=public.crm_create_manual_group(adm,'Private test '||gen_random_uuid()::text);
+ blocked=false;begin perform public.crm_create_manual_lead(caller,'Unauthorized group','9876500124',hidden);exception when raise_exception then blocked=true;end;
+ if not blocked then raise exception 'Other group accepted';end if;
+ blocked=false;begin perform public.crm_create_manual_lead(adm,'Bad phone','123',hidden);exception when raise_exception then blocked=true;end;
+ if not blocked then raise exception 'Invalid phone accepted';end if;
+ result=public.crm_create_manual_lead(adm,'Admin manual','9876500125',hidden);
+ if not exists(select 1 from public.leads where id=(result->>'id')::uuid and assigned_to is null and owner_id=adm) then raise exception 'Admin assignment wrong';end if;
+ perform public.crm_set_caller_creation_permissions(adm,caller,true,false);
+ result=public.crm_create_manual_lead(caller,'Default bucket','9876500126',null);
+ if result->>'group_id' is null then raise exception 'Default group missing';end if;
+ perform public.crm_set_caller_creation_permissions(adm,caller,false,false);
+ blocked=false;begin perform public.crm_create_manual_lead(caller,'Revoked','9876500127',gid);exception when raise_exception then blocked=true;end;
+ if not blocked then raise exception 'Revocation not enforced';end if;
+ if has_function_privilege('authenticated','public.crm_create_manual_lead(uuid,text,text,uuid)','EXECUTE') or has_function_privilege('anon','public.crm_set_caller_creation_permissions(uuid,uuid,boolean,boolean)','EXECUTE') then raise exception 'Service RPC exposed';end if;
+end $$;
+select 'PASS: denied permissions, grant, self-assignment, admin ownership, duplicate blocking, group isolation, validation, revocation, service-only RPCs' as result;
+rollback;

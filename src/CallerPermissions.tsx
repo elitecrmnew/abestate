@@ -1,0 +1,7 @@
+import {useEffect,useState} from 'react'
+import {manualApi} from './ManualLead'
+export default function CallerPermissions({caller,onSaved}:{caller:{id:string;display_name:string;can_add_lead:boolean;can_create_group:boolean};onSaved:()=>Promise<void>}){
+ const [add,setAdd]=useState(caller.can_add_lead),[group,setGroup]=useState(caller.can_create_group),[busy,setBusy]=useState(false),[notice,setNotice]=useState('')
+ useEffect(()=>{setAdd(caller.can_add_lead);setGroup(caller.can_create_group)},[caller.can_add_lead,caller.can_create_group])
+ return <div className="caller-permissions"><label><input type="checkbox" checked={add} disabled={busy} onChange={e=>setAdd(e.target.checked)} aria-label={'Allow '+caller.display_name+' to add leads'}/>Add lead</label><label><input type="checkbox" checked={group} disabled={busy} onChange={e=>setGroup(e.target.checked)} aria-label={'Allow '+caller.display_name+' to create groups'}/>Create group</label><button className="text-button" disabled={busy||(add===caller.can_add_lead&&group===caller.can_create_group)} onClick={async()=>{setBusy(true);setNotice('');try{await manualApi({action:'permissions',id:caller.id,can_add_lead:add,can_create_group:group});await onSaved();setNotice('Saved')}catch(e){setNotice(e instanceof Error?e.message:'Could not save')}finally{setBusy(false)}}}>{busy?'Saving…':'Save permissions'}</button>{notice&&<small role="status">{notice}</small>}</div>
+}
