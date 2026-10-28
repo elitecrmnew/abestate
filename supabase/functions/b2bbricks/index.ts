@@ -71,6 +71,22 @@ Deno.serve(async(req:Request)=>{
    }catch{return reply({http,body:'',message:'Receipt is uncertain. Check the B2BBricks HTTP dump before resending; the sample may have arrived. No automatic retry was made.'})}
   }
 
+  if(b.action==='lead-tags'){
+   const tags:Record<string,{id:string;name:string;sent_at:string|null}[]>={};
+   for(let start=0;start<100000;start+=1000){
+    const {data,error}=await db.from('b2bbricks_deliveries').select('lead_id,connection_id,sent_at,created_at,b2bbricks_connections!inner(id,name)').eq('owner_id',owner).eq('status','Sent').eq('dedupe_exempt',false).not('lead_id','is',null).order('sent_at',{ascending:false,nullsFirst:false}).order('created_at',{ascending:false}).range(start,start+999);
+    if(error)throw error;
+    for(const d of data||[]){
+     const connection=(Array.isArray(d.b2bbricks_connections)?d.b2bbricks_connections[0]:d.b2bbricks_connections) as {id:string;name:string}|null;
+     if(!d.lead_id||!connection?.id)continue;
+     const destinations=tags[d.lead_id]||(tags[d.lead_id]=[]);
+     if(!destinations.some(item=>item.id===connection.id))destinations.push({id:connection.id,name:connection.name,sent_at:d.sent_at||null});
+    }
+    if((data||[]).length<1000)break;
+   }
+   return reply({tags});
+  }
+
   if(b.action==='connections'){
    const {data,error}=await db.from('b2bbricks_connections').select('*').eq('owner_id',owner).eq('archived',false).order('created_at');if(error)throw error;
    return reply({connections:(data||[]).map(safe)});
@@ -78,8 +94,10 @@ Deno.serve(async(req:Request)=>{
   if(b.action==='save-connection'){
    const x=b.config;if(!x||typeof x.name!=='string'||!x.name.trim()||x.name.length>100)throw Error('Enter a connection name.');
    let old:any=null;if(b.id){if(!uuid(b.id))throw Error('Invalid connection');const r=await db.from('b2bbricks_connections').select('*').eq('owner_id',owner).eq('id',b.id).eq('archived',false).single();if(r.error)throw Error('Connection unavailable');old=r.data;}
+   let template:any=null;
+   if(b.duplicate_from){if(b.id||!uuid(b.duplicate_from))throw Error('Invalid duplicate source');const r=await db.from('b2bbricks_connections').select('*').eq('owner_id',owner).eq('id',b.duplicate_from).eq('archived',false).single();if(r.error)throw Error('Original connection unavailable');template=r.data;if(!x.webhook_url?.trim())throw Error('Enter the new webhook URL for this copy.');}
    const url=x.webhook_url?validateDestination(String(x.webhook_url).trim()):old?.webhook_url||'';
-   const hs=x.headers===null||x.headers===undefined?old?.headers||{}:x.headers;
+   const hs=x.headers===null||x.headers===undefined?old?.headers||template?.headers||{}:x.headers;
    if(!hs||Array.isArray(hs)||typeof hs!=='object'||Object.keys(hs).length>12)throw Error('Headers must be a JSON object with at most 12 entries.');
    for(const [k,v] of Object.entries(hs)){if(!/^[a-zA-Z0-9-]{1,80}$/.test(k)||typeof v!=='string'||v.length>2000||/[\r\n]/.test(v)||/^(host|cookie|set-cookie|content-length|content-type|connection|transfer-encoding|proxy-.+|x-forwarded-.+)$/i.test(k))throw Error('Unsupported header. Configure Content-Type separately.');}
    if(!['POST','PUT'].includes(x.method)||!['application/json','application/x-www-form-urlencoded'].includes(x.content_type)||!['national','country','e164'].includes(x.phone_format))throw Error('Choose the request method, body format and phone format.');
@@ -116,7 +134,7 @@ Deno.serve(async(req:Request)=>{
     leads=b.leads.map((l:any)=>{if(!l||typeof l!=='object')throw Error('Invalid imported row');const out:Record<string,unknown>={};for(const k of ['source_lead_id','customer_name','email','budget','source','campaign_name','remark','original_lead_date']){if(l[k]!=null&&typeof l[k]!=='string')throw Error('Invalid imported field');out[k]=l[k]??'';if(String(out[k]).length>5000)throw Error('Imported field is too long');}
      if(!Array.isArray(l.phone_numbers)||l.phone_numbers.length>10||!l.phone_numbers.every((x:unknown)=>typeof x==='string'&&x.length<=80))throw Error('Invalid phone field');out.phone_numbers=l.phone_numbers;
      if(l.imported_fields&&(!l.imported_fields||Array.isArray(l.imported_fields)||typeof l.imported_fields!=='object'||JSON.stringify(l.imported_fields).length>16000))throw Error('Imported columns exceed 16 KB per lead');out.imported_fields=l.imported_fields||{};
-     if(out.original_lead_date&&!Number.isFinite(Date.parse(String(out.original_lead_date))))out.original_lead_date=null;return out as unknown as OutboundLead;});
+     return out as unknown as OutboundLead;});
    }
    if(!leads.length||leads.length>5000)throw Error('Send 1–5000 leads per batch.');if(b.action==='test'&&leads.length!==1)throw Error('Choose one test lead.');
    // Resolve group names from owned database rows, never client-supplied names.
@@ -150,7 +168,7 @@ Deno.serve(async(req:Request)=>{
   }
   if(b.action==='history'){
    const f=b.filters||{},page=Math.max(0,Math.min(100000,Number(b.page)||0));
-   let q=db.from('b2bbricks_deliveries').select('*,b2bbricks_batches!inner(name,group_id,is_test)',{count:'exact'}).eq('owner_id',owner);
+   let q=db.from('b2bbricks_deliveries').select('*,b2bbricks_batches!inner(name,group_id,is_test),b2bbricks_connections!inner(name)',{count:'exact'}).eq('owner_id',owner);
    if(f.status&&['Sent','Failed','Pending','Sending','Skipped','Duplicate'].includes(f.status))q=q.eq('status',f.status);
    for(const [key,value] of [['connection_id',f.connection_id],['batch_id',f.batch_id]])if(value){if(!uuid(value))throw Error('Invalid filter');q=q.eq(key,value)}
    if(f.group_id){if(!uuid(f.group_id))throw Error('Invalid group');q=q.eq('b2bbricks_batches.group_id',f.group_id)}

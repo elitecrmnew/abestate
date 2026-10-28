@@ -1,0 +1,11 @@
+const {test}=require('node:test'),assert=require('node:assert/strict');
+const {buildSync}=require('esbuild');
+const vm=require('node:vm'),path=require('node:path');
+const result=buildSync({entryPoints:[path.join(__dirname,'../src/b2bTags.ts')],bundle:true,platform:'node',format:'cjs',write:false});
+const moduleObj={exports:{}};vm.runInNewContext(result.outputFiles[0].text,{module:moduleObj,exports:moduleObj.exports,require,console});
+const {b2bTagLabel,b2bTagTitle}=moduleObj.exports;
+const destinations=[{id:'one',name:'Housee',sent_at:'2026-10-28T08:00:00Z'},{id:'two',name:'Rohaan Realty',sent_at:'2026-10-27T08:00:00Z'}];
+test('no successful transfers has no tag',()=>{assert.equal(b2bTagLabel([]),'');assert.equal(b2bTagTitle([]),'')});
+test('one destination names the B2BBricks connection',()=>{assert.equal(b2bTagLabel([destinations[0]]),'Sent to B2BBricks Housee');assert.equal(b2bTagTitle([destinations[0]]),'Sent to B2BBricks Housee')});
+test('multiple destinations use +N and retain every destination in the title',()=>{assert.equal(b2bTagLabel(destinations),'B2BBricks +1');assert.equal(b2bTagTitle(destinations),'Sent to B2BBricks Housee\nSent to B2BBricks Rohaan Realty')});
+test('three destinations report two extra connections',()=>{assert.equal(b2bTagLabel([...destinations,{id:'three',name:'Other',sent_at:null}]),'B2BBricks +2')});
