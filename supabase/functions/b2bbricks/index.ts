@@ -3,6 +3,44 @@ import {redactResponse,validateDestination,validateMapping,mapLead,type Outbound
 const base={'Content-Type':'application/json','Cache-Control':'no-store','Access-Control-Allow-Headers':'authorization,x-client-info,apikey,content-type','Access-Control-Allow-Methods':'POST,OPTIONS','Vary':'Origin'};
 const uuid=(v:unknown)=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 const safe=(c:Record<string,unknown>)=>{const {webhook_url,headers,...rest}=c;return {...rest,has_webhook:!!webhook_url,has_headers:Object.keys((headers||{}) as object).length>0}};
+
+const validClock=(v:unknown)=>typeof v==='string'&&/^(?:[01]\\d|2[0-3]):[0-5]\\d$/.test(v);
+function scheduleTransfer(entries:any[],schedule:any){
+ if(!schedule||schedule.enabled!==true)return entries;
+ if(schedule.mode!=='interval'&&schedule.mode!=='spread')throw Error('Choose a valid transfer release mode.');
+ const batchSize=Number(schedule.batch_size),hours=Number(schedule.interval_hours);
+ if(!Number.isInteger(batchSize)||batchSize<1||batchSize>100)throw Error('Choose 1–100 leads per transfer batch.');
+ if(!Number.isFinite(hours)||hours<1||hours>744)throw Error('Choose a transfer interval/duration from 1 to 744 hours.');
+ const work=!!schedule.work_enabled, offset=330*60000;
+ let from=0,to=24*60;
+ if(work){
+  if(!validClock(schedule.work_start)||!validClock(schedule.work_end))throw Error('Choose valid working hours.');
+  const parts=(s:string)=>Number(s.slice(0,2))*60+Number(s.slice(3,5));
+  from=parts(schedule.work_start);to=parts(schedule.work_end);
+  if(to<=from)throw Error('Working-hours end must be after the start.');
+ }
+ const align=(stamp:number)=>{
+  if(!work)return stamp;
+  const d=new Date(stamp+offset),mins=d.getUTCHours()*60+d.getUTCMinutes(),y=d.getUTCFullYear(),m=d.getUTCMonth(),day=d.getUTCDate();
+  if(mins<from)return Date.UTC(y,m,day,Math.floor(from/60),from%60)-offset;
+  if(mins>=to)return Date.UTC(y,m,day+1,Math.floor(from/60),from%60)-offset;
+  return stamp;
+ };
+ let base=schedule.start_at?Date.parse(String(schedule.start_at)):Date.now();
+ if(!Number.isFinite(base))throw Error('Choose a valid transfer start time.');
+ base=align(Math.max(Date.now(),base));
+ const sequence=new Map<number,string>();
+ const eligible=entries.map((e,i)=>({e,i})).filter(({e})=>!e.error&&/^\\+91[6-9]\\d{9}$/.test(String(e.mobile||'')));
+ const batchCount=Math.max(1,Math.ceil(eligible.length/batchSize));
+ const times:string[]=[];
+ for(let i=0;i<batchCount;i++){
+  const delta=schedule.mode==='interval'?i*hours:(batchCount>1?i*hours/(batchCount-1):0);
+  times.push(new Date(align(base+delta*3600000)).toISOString());
+ }
+ const positions=new Map<number,number>();
+ eligible.forEach(({i},n)=>positions.set(i,Math.floor(n/batchSize)));
+ return entries.map((e,i)=>({...e,scheduled_at:times[positions.get(i)||0]||new Date(base).toISOString()}));
+}
 Deno.serve(async(req:Request)=>{
  const headers:Record<string,string>={...base};const origin=req.headers.get('origin')||'';
  if(['https://abestate-crm.netlify.app','https://abestate.vercel.app','https://abestate.netlify.app'].includes(origin))headers['Access-Control-Allow-Origin']=origin;
@@ -175,7 +213,7 @@ Deno.serve(async(req:Request)=>{
     return reply({entries:result,connection_version:c.version,total:result.length,already_sent:result.filter(e=>e.already_sent).length,invalid:result.filter(e=>e.status==='Invalid').length,duplicates:result.filter(e=>e.status==='Duplicate').length,ready:result.filter(e=>e.status==='Ready').length});
    }
    if(!uuid(b.batch_id))throw Error('Invalid batch identifier.');if(typeof b.name!=='string'||!b.name.trim()||b.name.length>150)throw Error('Enter a batch name.');
-   const {data,error}=await db.rpc('b2b_enqueue',{p_owner:owner,p_connection:c.id,p_version:b.connection_version,p_batch:b.batch_id,p_name:b.name,p_group:groupId,p_mapping:mapping,p_entries:entries,p_force:!!b.force,p_test:b.action==='test',p_track:b.action==='test'&&!!b.track_test});if(error)throw Error(error.message);
+   const schedule=b.action==='enqueue'&&b.schedule?.enabled===true?b.schedule:null;const scheduledEntries=schedule?scheduleTransfer(entries,schedule):entries;const {data,error}=await db.rpc('b2b_enqueue',{p_owner:owner,p_connection:c.id,p_version:b.connection_version,p_batch:b.batch_id,p_name:b.name,p_group:groupId,p_mapping:mapping,p_entries:scheduledEntries,p_force:!!b.force,p_test:b.action==='test',p_track:b.action==='test'&&!!b.track_test});if(error)throw Error(error.message);
    return reply({batch_id:data});
   }
   if(b.action==='retry'||b.action==='cancel'){
