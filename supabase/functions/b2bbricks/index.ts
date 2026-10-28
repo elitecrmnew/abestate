@@ -73,14 +73,34 @@ Deno.serve(async(req:Request)=>{
 
   if(b.action==='lead-tags'){
    const tags:Record<string,{id:string;name:string;sent_at:string|null}[]>={};
+   const phoneToLeadIds=new Map<string,string[]>();
+   // Include legacy deliveries that predate lead_id tracking by safely matching their mobile.
    for(let start=0;start<100000;start+=1000){
-    const {data,error}=await db.from('b2bbricks_deliveries').select('lead_id,connection_id,sent_at,created_at,b2bbricks_connections!inner(id,name)').eq('owner_id',owner).eq('status','Sent').eq('dedupe_exempt',false).not('lead_id','is',null).order('sent_at',{ascending:false,nullsFirst:false}).order('created_at',{ascending:false}).range(start,start+999);
+    const {data,error}=await db.from('leads').select('id,phone_numbers').eq('owner_id',owner).order('id').range(start,start+999);
+    if(error)throw error;
+    for(const lead of data||[]){
+     for(const phone of lead.phone_numbers||[]){
+      const digits=String(phone||'').replace(/\\D/g,'');
+      if(digits.length<10)continue;
+      const key=digits.slice(-10),ids=phoneToLeadIds.get(key)||[];
+      if(!ids.includes(lead.id))ids.push(lead.id);
+      phoneToLeadIds.set(key,ids);
+     }
+    }
+    if((data||[]).length<1000)break;
+   }
+   for(let start=0;start<100000;start+=1000){
+    const {data,error}=await db.from('b2bbricks_deliveries').select('lead_id,mobile,connection_id,sent_at,created_at,b2bbricks_connections!inner(id,name)').eq('owner_id',owner).eq('status','Sent').eq('dedupe_exempt',false).order('sent_at',{ascending:false,nullsFirst:false}).order('created_at',{ascending:false}).range(start,start+999);
     if(error)throw error;
     for(const d of data||[]){
      const connection=(Array.isArray(d.b2bbricks_connections)?d.b2bbricks_connections[0]:d.b2bbricks_connections) as {id:string;name:string}|null;
-     if(!d.lead_id||!connection?.id)continue;
-     const destinations=tags[d.lead_id]||(tags[d.lead_id]=[]);
-     if(!destinations.some(item=>item.id===connection.id))destinations.push({id:connection.id,name:connection.name,sent_at:d.sent_at||null});
+     if(!connection?.id)continue;
+     const digits=String(d.mobile||'').replace(/\\D/g,'');
+     const matchedIds=d.lead_id?[d.lead_id]:(digits.length>=10?phoneToLeadIds.get(digits.slice(-10))||[]:[]);
+     for(const leadId of matchedIds){
+      const destinations=tags[leadId]||(tags[leadId]=[]);
+      if(!destinations.some(item=>item.id===connection.id))destinations.push({id:connection.id,name:connection.name,sent_at:d.sent_at||null});
+     }
     }
     if((data||[]).length<1000)break;
    }
